@@ -1,68 +1,133 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { supabase } from "../../../lib/supabase";
+import { supabase } from "../../lib/supabase";
 
-export default function LeagueHomePage() {
-  const params = useParams();
+export default function DashboardPage() {
   const router = useRouter();
-  const leagueId = params.id;
-
   const [user, setUser] = useState(null);
-  const [league, setLeague] = useState(null);
-  const [members, setMembers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [leagues, setLeagues] = useState([]);
+  const [checking, setChecking] = useState(true);
+  const [loadingLeagues, setLoadingLeagues] = useState(false);
+  const [createName, setCreateName] = useState("");
+  const [joinCode, setJoinCode] = useState("");
   const [message, setMessage] = useState("");
+  const [working, setWorking] = useState("");
 
-  const currentMembership = useMemo(
-    () => members.find((member) => member.user_id === user?.id),
-    [members, user]
-  );
+  const loadLeagues = useCallback(async (userId) => {
+    setLoadingLeagues(true);
+
+    const { data, error } = await supabase
+      .from("league_members")
+      .select(`
+        role,
+        joined_at,
+        leagues (
+          id,
+          name,
+          invite_code,
+          commissioner_id,
+          created_at
+        )
+      `)
+      .eq("user_id", userId)
+      .order("joined_at", { ascending: false });
+
+    if (error) {
+      setMessage(error.message);
+      setLeagues([]);
+    } else {
+      setLeagues((data || []).filter((item) => item.leagues));
+    }
+
+    setLoadingLeagues(false);
+  }, []);
 
   useEffect(() => {
-    let active = true;
+    let mounted = true;
 
-    async function load() {
-      const { data: authData } = await supabase.auth.getUser();
+    supabase.auth.getUser().then(async ({ data }) => {
+      if (!mounted) return;
 
-      if (!active) return;
-
-      if (!authData.user) {
+      if (!data.user) {
         router.replace("/login");
         return;
       }
 
-      setUser(authData.user);
+      setUser(data.user);
+      await loadLeagues(data.user.id);
+      setChecking(false);
+    });
 
-      const { data, error } = await supabase.rpc("get_league_home", {
-        p_league_id: leagueId
-      });
-
-      if (!active) return;
-
-      if (error) {
-        setMessage(error.message);
-      } else {
-        setLeague(data.league);
-        setMembers(data.members || []);
-      }
-
-      setLoading(false);
-    }
-
-    load();
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) router.replace("/login");
+    });
 
     return () => {
-      active = false;
+      mounted = false;
+      listener.subscription.unsubscribe();
     };
-  }, [leagueId, router]);
+  }, [router, loadLeagues]);
 
-  async function copyInviteCode() {
-    if (!league?.invite_code) return;
-    await navigator.clipboard.writeText(league.invite_code);
-    setMessage(`Invite code ${league.invite_code} copied.`);
+  async function createLeague(event) {
+    event.preventDefault();
+    const name = createName.trim();
+
+    if (name.length < 3) {
+      setMessage("League names must be at least 3 characters.");
+      return;
+    }
+
+    setWorking("create");
+    setMessage("");
+
+    const { data, error } = await supabase.rpc("create_league", {
+      p_name: name
+    });
+
+    if (error) {
+      setMessage(error.message);
+    } else {
+      setCreateName("");
+      setMessage(`League created. Invite code: ${data.invite_code}`);
+      await loadLeagues(user.id);
+    }
+
+    setWorking("");
+  }
+
+  async function joinLeague(event) {
+    event.preventDefault();
+    const code = joinCode.trim().toUpperCase();
+
+    if (code.length !== 6) {
+      setMessage("Enter the complete 6-character invite code.");
+      return;
+    }
+
+    setWorking("join");
+    setMessage("");
+
+    const { data, error } = await supabase.rpc("join_league_by_code", {
+      p_code: code
+    });
+
+    if (error) {
+      setMessage(error.message);
+    } else {
+      setJoinCode("");
+      setMessage(`You joined ${data.name}.`);
+      await loadLeagues(user.id);
+    }
+
+    setWorking("");
+  }
+
+  async function copyCode(code) {
+    await navigator.clipboard.writeText(code);
+    setMessage(`Invite code ${code} copied.`);
   }
 
   async function signOut() {
@@ -70,26 +135,12 @@ export default function LeagueHomePage() {
     router.replace("/");
   }
 
-  if (loading) {
-    return <main className="loading-screen">Opening your league clubhouse…</main>;
+  if (checking) {
+    return <main className="loading-screen">Loading your clubhouse…</main>;
   }
 
-  if (!league) {
-    return (
-      <main className="league-error-page">
-        <div className="empty-state compact">
-          <div className="crest">♛</div>
-          <h2>League unavailable.</h2>
-          <p>{message || "You may not have access to this league."}</p>
-          <Link className="primary-button" href="/dashboard">
-            Back to Dashboard
-          </Link>
-        </div>
-      </main>
-    );
-  }
-
-  const isCommissioner = currentMembership?.role === "commissioner";
+  const displayName =
+    user?.user_metadata?.display_name || user?.email?.split("@")[0];
 
   return (
     <main className="dashboard-page">
@@ -100,11 +151,11 @@ export default function LeagueHomePage() {
         </Link>
 
         <nav>
-          <Link href="/dashboard">Overview</Link>
-          <a className="active">League Home</a>
-          <a>Members</a>
-          <a>Draft Room</a>
-          <a>Settings</a>
+          <a className="active">Overview</a>
+          <a>My Team</a>
+          <a>League</a>
+          <a>Transactions</a>
+          <a>Majors</a>
         </nav>
 
         <button className="ghost-button" onClick={signOut}>
@@ -113,108 +164,123 @@ export default function LeagueHomePage() {
       </aside>
 
       <section className="dashboard-content">
-        <header className="league-hero">
+        <header className="dashboard-header">
           <div>
-            <Link className="back-link" href="/dashboard">
-              ← All leagues
-            </Link>
-            <p className="eyebrow">
-              {isCommissioner ? "Commissioner Clubhouse" : "League Clubhouse"}
-            </p>
-            <h1>{league.name}</h1>
+            <p className="eyebrow">Clubhouse</p>
+            <h1>Welcome, {displayName}</h1>
             <p className="muted">
-              Manage your members, prepare for the draft, and build your dynasty.
+              Create a league or join one using a commissioner’s invite code.
             </p>
           </div>
-
-          <div className="league-code-panel">
-            <small>Invite code</small>
-            <strong>{league.invite_code}</strong>
-            <button onClick={copyInviteCode}>Copy Code</button>
-          </div>
+          <span className="account-chip">{user.email}</span>
         </header>
 
         {message && <div className="dashboard-message">{message}</div>}
 
-        <div className="stats-grid league-stats">
-          <article className="stat-card">
-            <span>Members</span>
-            <strong>{members.length}</strong>
-            <small>League managers</small>
-          </article>
-          <article className="stat-card">
-            <span>Your role</span>
-            <strong className="role-stat">
-              {isCommissioner ? "Commissioner" : "Member"}
-            </strong>
-            <small>
-              {isCommissioner ? "Full league controls" : "League participant"}
-            </small>
-          </article>
-          <article className="stat-card">
-            <span>Draft status</span>
-            <strong>Not Set</strong>
-            <small>Commissioner setup coming next</small>
-          </article>
-        </div>
+        <section className="league-action-grid">
+          <form className="league-action-card" onSubmit={createLeague}>
+            <p className="eyebrow">Commissioner tools</p>
+            <h2>Create a league</h2>
+            <p>Start a new dynasty and receive a code to invite friends.</p>
+            <label>
+              League name
+              <input
+                value={createName}
+                onChange={(event) => setCreateName(event.target.value)}
+                placeholder="Sunday Pins Dynasty"
+                minLength={3}
+                maxLength={50}
+                required
+              />
+            </label>
+            <button className="primary-button" disabled={working === "create"}>
+              {working === "create" ? "Creating…" : "Create League"}
+            </button>
+          </form>
 
-        <section className="league-home-grid">
-          <article className="members-panel">
-            <div className="section-title-row">
-              <div>
-                <p className="eyebrow">League membership</p>
-                <h2>Clubhouse Members</h2>
-              </div>
-              <span>{members.length} joined</span>
+          <form className="league-action-card" onSubmit={joinLeague}>
+            <p className="eyebrow">Have an invitation?</p>
+            <h2>Join a league</h2>
+            <p>Enter the six-character code shared by the commissioner.</p>
+            <label>
+              Invite code
+              <input
+                className="code-input"
+                value={joinCode}
+                onChange={(event) =>
+                  setJoinCode(
+                    event.target.value
+                      .toUpperCase()
+                      .replace(/[^A-Z0-9]/g, "")
+                      .slice(0, 6)
+                  )
+                }
+                placeholder="FD2026"
+                minLength={6}
+                maxLength={6}
+                required
+              />
+            </label>
+            <button className="secondary-button" disabled={working === "join"}>
+              {working === "join" ? "Joining…" : "Join League"}
+            </button>
+          </form>
+        </section>
+
+        <section className="league-list-section">
+          <div className="section-title-row">
+            <div>
+              <p className="eyebrow">Your leagues</p>
+              <h2>Dynasties</h2>
             </div>
+            <span>{leagues.length} total</span>
+          </div>
 
-            <div className="member-list">
-              {members.map((member, index) => (
-                <div className="member-row" key={member.user_id}>
-                  <div className="member-avatar">
-                    {(member.display_name || member.email || "?")
-                      .slice(0, 2)
-                      .toUpperCase()}
-                  </div>
-                  <div className="member-info">
-                    <strong>
-                      {member.display_name || member.email?.split("@")[0] || "Manager"}
-                    </strong>
-                    <span>
-                      {member.role === "commissioner"
-                        ? "Commissioner"
-                        : `Member ${index + 1}`}
+          {loadingLeagues ? (
+            <div className="empty-state compact">Loading leagues…</div>
+          ) : leagues.length === 0 ? (
+            <div className="empty-state compact">
+              <div className="crest">♛</div>
+              <h2>No leagues yet.</h2>
+              <p>Create one above or ask a commissioner for an invite code.</p>
+            </div>
+          ) : (
+            <div className="league-grid">
+              {leagues.map(({ role, leagues: league }) => (
+                <article className="league-card" key={league.id}>
+                  <div className="league-card-top">
+                    <span className={`role-badge ${role}`}>
+                      {role === "commissioner" ? "Commissioner" : "Member"}
                     </span>
+                    <span className="member-count">Season setup</span>
                   </div>
-                  <span className={`role-badge ${member.role}`}>
-                    {member.role}
-                  </span>
-                </div>
+                  <h3>{league.name}</h3>
+                  <p>
+                    {role === "commissioner"
+                      ? "Share this code to invite league members."
+                      : "You are officially part of this dynasty."}
+                  </p>
+                  <div className="invite-code-row">
+                    <div>
+                      <small>Invite code</small>
+                      <strong>{league.invite_code}</strong>
+                    </div>
+                    <button onClick={() => copyCode(league.invite_code)}>
+                      Copy
+                    </button>
+                  </div>
+                  <Link
+                    className="league-enter-button"
+                    href={`/league/${league.id}`}
+                  >
+                    Enter League
+                  </Link>
+                </article>
               ))}
             </div>
-          </article>
-
-          <aside className="league-sidebar-panel">
-            <p className="eyebrow">Next milestone</p>
-            <h2>Prepare the draft room.</h2>
-            <p>
-              Next we’ll add league settings, roster size, draft order, and a live
-              snake-draft board.
-            </p>
-
-            <div className="setup-list">
-              <div><span>1</span><p><b>Members</b><small>Invite managers with your code.</small></p></div>
-              <div><span>2</span><p><b>League settings</b><small>Choose roster and scoring rules.</small></p></div>
-              <div><span>3</span><p><b>Draft room</b><small>Set the order and begin drafting.</small></p></div>
-            </div>
-
-            <button className="primary-button" disabled>
-              Draft setup coming next
-            </button>
-          </aside>
+          )}
         </section>
       </section>
     </main>
   );
 }
-
